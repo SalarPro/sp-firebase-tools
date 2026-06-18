@@ -1,0 +1,16 @@
+{
+  "name": "firebase-backup-tool",
+  "version": "1.0.0",
+  "description": "Local web app to back up Firestore and Firebase Storage using a service account key.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "express": "^4.19.2",
+    "firebase-admin": "^12.7.0",
+    "multer": "^1.4.5-lts.1"
+  }
+}

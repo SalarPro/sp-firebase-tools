@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Firebase Backup Tool</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --card: #1a1d27;
+      --border: #2a2e3b;
+      --text: #e6e8ee;
+      --muted: #9aa0b0;
+      --accent: #ffa000;
+      --accent-2: #ff6f00;
+      --green: #2ecc71;
+      --red: #ff5c5c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text); line-height: 1.5;
+    }
+    .wrap { max-width: 820px; margin: 0 auto; padding: 32px 20px 80px; }
+    header { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+    header .logo {
+      width: 34px; height: 34px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      display: grid; place-items: center; font-weight: 800; color: #2a1500;
+    }
+    h1 { font-size: 22px; margin: 0; }
+    .sub { color: var(--muted); margin: 0 0 28px; font-size: 14px; }
+    .card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+      padding: 22px; margin-bottom: 20px;
+    }
+    .card h2 { font-size: 15px; margin: 0 0 14px; letter-spacing: .3px; }
+    .step-num {
+      display: inline-grid; place-items: center; width: 22px; height: 22px;
+      border-radius: 50%; background: var(--accent); color: #2a1500;
+      font-size: 13px; font-weight: 700; margin-right: 8px;
+    }
+    label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 6px; }
+    input[type="text"], textarea {
+      width: 100%; background: #11141c; border: 1px solid var(--border);
+      color: var(--text); border-radius: 8px; padding: 10px 12px; font-size: 13px;
+      font-family: inherit;
+    }
+    textarea { resize: vertical; min-height: 80px; font-family: ui-monospace, Menlo, monospace; }
+    .file-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    input[type="file"] { color: var(--muted); font-size: 13px; }
+    .btn {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #2a1500; border: none; border-radius: 8px; padding: 11px 18px;
+      font-size: 14px; font-weight: 700; cursor: pointer; transition: opacity .15s;
+    }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .btn.secondary {
+      background: transparent; color: var(--text); border: 1px solid var(--border);
+    }
+    .btn-row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px; }
+    .status-pill {
+      display: inline-flex; align-items: center; gap: 8px; font-size: 13px;
+      padding: 6px 12px; border-radius: 20px; border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+    .dot.on { background: var(--green); }
+    .muted { color: var(--muted); font-size: 12px; }
+    .actions { opacity: .5; pointer-events: none; transition: opacity .2s; }
+    .actions.enabled { opacity: 1; pointer-events: auto; }
+    .log {
+      background: #0a0c11; border: 1px solid var(--border); border-radius: 8px;
+      padding: 14px; height: 240px; overflow-y: auto; font-family: ui-monospace, Menlo, monospace;
+      font-size: 12px; white-space: pre-wrap; color: #c9cdd8; margin-top: 16px;
+    }
+    .log .err { color: var(--red); }
+    .log .ok { color: var(--green); }
+    a { color: var(--accent); }
+    details { margin-top: 10px; }
+    summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo">🔥</div>
+      <h1>Firebase Backup Tool</h1>
+    </header>
+    <p class="sub">Runs locally on your computer. Back up Firestore and Storage with a service account key.</p>
+
+    <!-- Step 1: connect -->
+    <div class="card">
+      <h2><span class="step-num">1</span>Connect to your Firebase project</h2>
+      <div class="file-row">
+        <input type="file" id="keyfile" accept="application/json,.json" />
+        <span class="muted">Select your service account key (.json)</span>
+      </div>
+
+      <details>
+        <summary>…or paste the key JSON instead</summary>
+        <textarea id="keypaste" placeholder='{ "type": "service_account", "project_id": "...", ... }'></textarea>
+      </details>
+
+      <label for="bucket">Storage bucket name (optional — leave blank to auto-detect)</label>
+      <input type="text" id="bucket" placeholder="your-project.appspot.com" />
+      <p class="hint">Newer projects may use <code>your-project.firebasestorage.app</code>. If a Storage backup fails, enter the exact name shown in Firebase Console → Storage.</p>
+
+      <div class="btn-row" style="margin-top:16px;">
+        <button class="btn" id="connectBtn">Connect</button>
+        <span class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">Not connected</span></span>
+      </div>
+    </div>
+
+    <!-- Step 2: backups -->
+    <div class="card actions" id="actions">
+      <h2><span class="step-num">2</span>Run a backup</h2>
+      <p class="muted" id="backupInfo">Connect first to enable backups.</p>
+      <div class="btn-row">
+        <button class="btn" id="firestoreBtn">Backup Firestore</button>
+        <button class="btn" id="storageBtn">Backup Storage</button>
+      </div>
+      <div class="log" id="log">Logs will appear here…</div>
+    </div>
+
+    <p class="muted" style="text-align:center;">Your key and data never leave your machine. Nothing is uploaded anywhere.</p>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const logEl = $("log");
+    let busy = false;
+
+    // Guard: this page must be served by the running server, not opened as a file.
+    if (location.protocol === "file:") {
+      document.body.innerHTML =
+        '<div style="max-width:620px;margin:80px auto;padding:30px;font-family:sans-serif;' +
+        'background:#1a1d27;color:#e6e8ee;border:1px solid #ff5c5c;border-radius:12px;line-height:1.6">' +
+        '<h2 style="color:#ff5c5c;margin-top:0">Open the app the right way</h2>' +
+        "<p>It looks like you opened this file directly in the browser. The backup " +
+        "buttons can't reach the server that way.</p>" +
+        "<p><strong>Instead:</strong></p>" +
+        "<ol><li>Open a terminal in the app folder</li>" +
+        "<li>Run <code style=\"background:#0a0c11;padding:2px 6px;border-radius:4px\">npm start</code></li>" +
+        '<li>Go to <a style="color:#ffa000" href="http://localhost:4000">http://localhost:4000</a> ' +
+        "in your browser</li></ol></div>";
+      throw new Error("Opened as file://");
+    }
+
+    function logLine(msg, cls) {
+      const span = document.createElement("div");
+      if (cls) span.className = cls;
+      span.textContent = msg;
+      logEl.appendChild(span);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    function clearLog() { logEl.innerHTML = ""; }
+
+    function setConnected(info) {
+      $("statusDot").classList.add("on");
+      $("statusText").textContent = "Connected: " + info.projectId;
+      $("actions").classList.add("enabled");
+      $("backupInfo").textContent =
+        "Project: " + info.projectId + "  •  Bucket: " + info.bucket +
+        "  •  Backups saved to the app's /backups folder.";
+    }
+
+    $("connectBtn").addEventListener("click", async () => {
+      const file = $("keyfile").files[0];
+      const paste = $("keypaste").value.trim();
+      const bucket = $("bucket").value.trim();
+      if (!file && !paste) {
+        alert("Select your service account .json file, or paste the JSON.");
+        return;
+      }
+      $("connectBtn").disabled = true;
+      $("connectBtn").textContent = "Connecting…";
+      try {
+        let res;
+        if (file) {
+          const fd = new FormData();
+          fd.append("keyfile", file);
+          if (bucket) fd.append("bucket", bucket);
+          res = await fetch("/api/connect", { method: "POST", body: fd });
+        } else {
+          res = await fetch("/api/connect", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ keyjson: paste, bucket }),
+          });
+        }
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Connection failed");
+        setConnected(data);
+        clearLog();
+        logLine("Connected to " + data.projectId, "ok");
+      } catch (e) {
+        let msg = e.message;
+        if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+          msg = "Can't reach the server. Make sure 'npm start' is running in the " +
+                "app folder, and that you opened http://localhost:4000 (not the file directly).";
+        }
+        alert("Could not connect:\n\n" + msg);
+      } finally {
+        $("connectBtn").disabled = false;
+        $("connectBtn").textContent = "Connect";
+      }
+    });
+
+    function runBackup(kind, btn) {
+      if (busy) return;
+      busy = true;
+      $("firestoreBtn").disabled = true;
+      $("storageBtn").disabled = true;
+      const original = btn.textContent;
+      btn.textContent = "Running…";
+      clearLog();
+      logLine("Starting " + kind + " backup…");
+
+      const es = new EventSource("/api/backup/" + kind);
+      es.onmessage = (ev) => {
+        const { type, message } = JSON.parse(ev.data);
+        if (type === "log") logLine(message);
+        else if (type === "done") { logLine("\n" + message, "ok"); es.close(); finish(); }
+        else if (type === "error") { logLine("\n" + message, "err"); es.close(); finish(); }
+      };
+      es.onerror = () => { logLine("\nConnection to server lost.", "err"); es.close(); finish(); };
+
+      function finish() {
+        busy = false;
+        $("firestoreBtn").disabled = false;
+        $("storageBtn").disabled = false;
+        btn.textContent = original;
+      }
+    }
+
+    $("firestoreBtn").addEventListener("click", (e) => runBackup("firestore", e.target));
+    $("storageBtn").addEventListener("click", (e) => runBackup("storage", e.target));
+
+    // Restore connection state if the page is reloaded.
+    fetch("/api/status").then(r => r.json()).then(s => {
+      if (s.connected) setConnected({ projectId: s.projectId, bucket: s.bucket });
+    });
+  </script>
+</body>
+</html>
