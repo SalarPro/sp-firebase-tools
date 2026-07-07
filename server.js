@@ -22,6 +22,12 @@ app.use(express.static(path.join(__dirname, "public")));
 // Where backups are written. Each run gets its own timestamped subfolder.
 const BACKUP_ROOT = path.join(__dirname, "backups");
 
+// How many network operations run at the same time by default. Higher is
+// faster but uses more memory/bandwidth and is more likely to hit Firebase
+// rate limits. Both can be overridden per run with ?concurrency=N.
+const FIRESTORE_CONCURRENCY = 25; // parallel Firestore reads (get + listCollections)
+const STORAGE_CONCURRENCY = 12; // parallel Storage file downloads
+
 // Holds the active Firebase connection for this session.
 let state = {
   app: null,
@@ -33,6 +39,44 @@ let state = {
 
 function timestamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+// A tiny promise pool (like p-limit). Returns a `limit(fn)` function that runs
+// at most `concurrency` of the wrapped async functions at once and queues the
+// rest. Only the wrapped call holds a slot, so recursive callers can fan out
+// freely without deadlocking the pool.
+function createLimiter(concurrency) {
+  const max = Math.max(1, concurrency | 0);
+  let active = 0;
+  const queue = [];
+
+  const drain = () => {
+    while (active < max && queue.length > 0) {
+      active++;
+      const { fn, resolve, reject } = queue.shift();
+      Promise.resolve()
+        .then(fn)
+        .then(resolve, reject)
+        .finally(() => {
+          active--;
+          drain();
+        });
+    }
+  };
+
+  return (fn) =>
+    new Promise((resolve, reject) => {
+      queue.push({ fn, resolve, reject });
+      drain();
+    });
+}
+
+// Read a user-supplied ?concurrency=N value, falling back to a default and
+// clamping to a sane range.
+function parseConcurrency(raw, fallback) {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return Math.min(n, 100);
 }
 
 // Convert Firestore-specific data types into plain JSON-safe values.
@@ -67,31 +111,42 @@ function serializeValue(value) {
 }
 
 // Recursively export a collection reference into outDir, sending progress
-// strings through `log`. Returns the document count.
-async function exportCollection(colRef, outDir, log) {
+// strings through `log`. `limit` is the shared concurrency pool — every
+// Firestore network call goes through it so the whole (recursive) export
+// never exceeds the configured number of in-flight reads. Returns the
+// document count for this collection level.
+async function exportCollection(colRef, outDir, log, limit) {
   fs.mkdirSync(outDir, { recursive: true });
-  const snapshot = await colRef.get();
-  let count = 0;
-  const docsData = {};
+  const snapshot = await limit(() => colRef.get());
 
+  const docsData = {};
   for (const doc of snapshot.docs) {
     docsData[doc.id] = serializeValue(doc.data());
-    count++;
-
-    // Recurse into any subcollections of this document.
-    const subcollections = await doc.ref.listCollections();
-    for (const sub of subcollections) {
-      const subDir = path.join(outDir, doc.id, sub.id);
-      const subCount = await exportCollection(sub, subDir, log);
-      log(`    subcollection ${colRef.id}/${doc.id}/${sub.id}: ${subCount} docs`);
-    }
   }
+  const count = snapshot.size;
 
   // Write the whole collection as a single JSON file.
   fs.writeFileSync(
     path.join(outDir, "__data__.json"),
     JSON.stringify(docsData, null, 2)
   );
+
+  // Walk every document's subcollections in parallel. The recursion fans out
+  // freely; only the actual reads (listCollections / get) take a slot in the
+  // shared pool, which keeps total concurrency bounded without deadlocking.
+  await Promise.all(
+    snapshot.docs.map(async (doc) => {
+      const subcollections = await limit(() => doc.ref.listCollections());
+      await Promise.all(
+        subcollections.map(async (sub) => {
+          const subDir = path.join(outDir, doc.id, sub.id);
+          const subCount = await exportCollection(sub, subDir, log, limit);
+          log(`    subcollection ${colRef.id}/${doc.id}/${sub.id}: ${subCount} docs`);
+        })
+      );
+    })
+  );
+
   return count;
 }
 
@@ -181,23 +236,30 @@ app.get("/api/backup/firestore", async (req, res) => {
   }
 
   try {
+    const concurrency = parseConcurrency(req.query.concurrency, FIRESTORE_CONCURRENCY);
+    const limit = createLimiter(concurrency);
     const db = state.app.firestore();
     const outDir = path.join(BACKUP_ROOT, `${state.projectId}_firestore_${timestamp()}`);
     fs.mkdirSync(outDir, { recursive: true });
     log(`Saving to: ${outDir}`);
+    log(`Reading up to ${concurrency} documents/subcollections in parallel.`);
 
     const collections = await db.listCollections();
     if (collections.length === 0) {
       log("No collections found in Firestore.");
     }
 
-    let total = 0;
-    for (const col of collections) {
-      log(`Exporting collection: ${col.id} ...`);
-      const count = await exportCollection(col, path.join(outDir, col.id), log);
-      total += count;
-      log(`  ${col.id}: ${count} documents`);
-    }
+    // Export top-level collections in parallel. The shared limiter caps the
+    // total in-flight reads across all collections and their subcollections.
+    const counts = await Promise.all(
+      collections.map(async (col) => {
+        log(`Exporting collection: ${col.id} ...`);
+        const count = await exportCollection(col, path.join(outDir, col.id), log, limit);
+        log(`  ${col.id}: ${count} documents`);
+        return count;
+      })
+    );
+    const total = counts.reduce((sum, c) => sum + c, 0);
 
     sseSend(res, "done", `Firestore backup complete — ${total} documents across ${collections.length} collections.\nFolder: ${outDir}`);
   } catch (err) {
@@ -218,29 +280,43 @@ app.get("/api/backup/storage", async (req, res) => {
   }
 
   try {
+    const concurrency = parseConcurrency(req.query.concurrency, STORAGE_CONCURRENCY);
+    const limit = createLimiter(concurrency);
     const bucket = state.app.storage().bucket();
     const outDir = path.join(BACKUP_ROOT, `${state.projectId}_storage_${timestamp()}`);
     fs.mkdirSync(outDir, { recursive: true });
     log(`Saving to: ${outDir}`);
     log(`Listing files in bucket: ${bucket.name} ...`);
 
-    const [files] = await bucket.getFiles();
+    const [allFiles] = await bucket.getFiles();
+    // Skip "folder placeholder" objects whose names end with a slash.
+    const files = allFiles.filter((f) => !f.name.endsWith("/"));
     if (files.length === 0) {
       log("No files found in Storage.");
     }
+    log(`Downloading ${files.length} files, up to ${concurrency} at a time ...`);
 
     let done = 0;
-    for (const file of files) {
-      const dest = path.join(outDir, file.name);
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      // Skip "folder placeholder" objects that end with a slash.
-      if (file.name.endsWith("/")) continue;
-      await file.download({ destination: dest });
-      done++;
-      log(`  (${done}/${files.length}) ${file.name}`);
-    }
+    let failed = 0;
+    await Promise.all(
+      files.map((file) =>
+        limit(async () => {
+          const dest = path.join(outDir, file.name);
+          fs.mkdirSync(path.dirname(dest), { recursive: true });
+          try {
+            await file.download({ destination: dest });
+            done++;
+            log(`  (${done}/${files.length}) ${file.name}`);
+          } catch (e) {
+            failed++;
+            log(`  ! failed: ${file.name} — ${e.message}`);
+          }
+        })
+      )
+    );
 
-    sseSend(res, "done", `Storage backup complete — ${done} files downloaded.\nFolder: ${outDir}`);
+    const note = failed ? ` (${failed} failed)` : "";
+    sseSend(res, "done", `Storage backup complete — ${done} files downloaded${note}.\nFolder: ${outDir}`);
   } catch (err) {
     let hint = "";
     if (/does not exist|notFound|No such/i.test(err.message)) {

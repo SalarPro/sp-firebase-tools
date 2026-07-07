@@ -117,6 +117,12 @@
     <div class="card actions" id="actions">
       <h2><span class="step-num">2</span>Run a backup</h2>
       <p class="muted" id="backupInfo">Connect first to enable backups.</p>
+      <div class="file-row" style="margin-bottom:14px;">
+        <label for="concurrency" style="margin:0;">Parallel downloads</label>
+        <input type="number" id="concurrency" min="1" max="100" placeholder="auto"
+               style="width:90px;background:#11141c;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:13px;" />
+        <span class="muted">Higher = faster. Leave blank for the default (Firestore 25, Storage 12).</span>
+      </div>
       <div class="btn-row">
         <button class="btn" id="firestoreBtn">Backup Firestore</button>
         <button class="btn" id="storageBtn">Backup Storage</button>
@@ -218,7 +224,9 @@
       clearLog();
       logLine("Starting " + kind + " backup…");
 
-      const es = new EventSource("/api/backup/" + kind);
+      const conc = parseInt($("concurrency").value, 10);
+      const qs = Number.isFinite(conc) && conc > 0 ? "?concurrency=" + conc : "";
+      const es = new EventSource("/api/backup/" + kind + qs);
       es.onmessage = (ev) => {
         const { type, message } = JSON.parse(ev.data);
         if (type === "log") logLine(message);

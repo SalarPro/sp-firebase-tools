@@ -50,6 +50,11 @@ Open **http://localhost:4000** in your browser.
    as JSON files.
 3. **Backup Storage** — downloads every file from your Storage bucket.
 
+Both backups run **in parallel** to finish much faster on large projects. The
+**Parallel downloads** field controls how many documents/files are fetched at
+once (default: Firestore 25, Storage 12). Raise it for more speed if your
+network and machine can keep up; lower it if you hit Firebase rate limits.
+
 ## Where backups go
 
 Everything is saved inside a **`backups/`** folder next to this app. Each run
@@ -85,8 +90,10 @@ types are preserved with a `__type__` marker so they are not lost:
 - **Storage backup fails / bucket not found** — enter the exact bucket name when
   connecting. Find it in Firebase Console → Storage (e.g.
   `your-project.appspot.com` or `your-project.firebasestorage.app`).
-- **Large databases** — backups read every document and download every file, so
-  big projects can take a while. Watch the live log for progress.
+- **Large databases** — backups read documents and download files in parallel,
+  so big projects finish much faster than one-at-a-time. If it's still slow,
+  raise **Parallel downloads**; if you see rate-limit or timeout errors, lower
+  it. Watch the live log for progress.
 
 ## Notes & limits (first version)
 
